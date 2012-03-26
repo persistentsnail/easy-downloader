@@ -21,9 +21,9 @@ typedef struct _task_list
 typedef struct _thread_info
 {
 	//void *(*thread_entry)(void*);
+	pthread_t        tid;
 	pthread_cond_t  *active_cond;
 	pthread_mutex_t *active_mutex;
-	int quit; 
 	task_node       *task;
 }thread_info;
 
@@ -35,7 +35,6 @@ typedef struct _thread_array
 	int               unused_size;
 
 	pthread_mutex_t   *mutex;
-	pthread_cond_t    *cond;     // 似乎不需要
 }thread_array;
 
 typedef struct _idle_thread_id_array
@@ -49,6 +48,7 @@ typedef struct _idle_thread_id_array
 typedef struct _easy_thread_pool_manager
 {
 	easy_thread_pool  *easy_tp;
+	pthread_t         tid;
 
 	thread_array      all_threads;
 	task_list         all_tasks;
@@ -63,6 +63,10 @@ typedef struct _thread_task_arg
 	int                    id;
 }thread_task_arg;
 
+static void *exit_task_entry(void *arg)
+{
+}
+
 static void *thread_task_entry(void *arg)
 {
 	// attention! here no lock
@@ -73,15 +77,18 @@ static void *thread_task_entry(void *arg)
 	//
 	while (;;)
 	{
+		task_node *task;
 		pthread_mutex_lock(ti->active_mutex);
-		while (ti->task == NULL || !ti->quit)
+		while (ti->task == NULL)
 			pthread_cond_wait(ti->active_cond, ti->active_mutex);
+		task = ti->task;
+		ti->task = NULL;
 		pthread_mutex_unlock(ti->active_mutex);
-		if (!ti->quit)
+		if (task->func != exit_task_entry)
 		{
 			// ASSERT(ti->task);
-			ti->task.desc->ret = ti->task.func(ti->task.desc->argc);
-			free(ti->task);
+			task->desc->ret = task->func(task->desc->argc);
+			free(task);
 			// become idle
 			pthread_mutex_lock(manager->idle_threads.mutex);
 			manager->idle_threads.idxs[manager->idle_threads.size] = id;
@@ -90,7 +97,10 @@ static void *thread_task_entry(void *arg)
 			pthread_cond_signal(manager->idle_threads.cond);
 		}
 		else
+		{
+			exit_task_entry();
 			break;
+		}
 	}
 	free(arg);
 	return 0;
@@ -110,8 +120,36 @@ static void *thread_manager_entry(void *arg)
 		while (manager->all_tasks.head == NULL)
 			pthread_cond_wait(manager->all_tasks.cond, manager->all_tasks.mutex);
 		task = manager->all_tasks.head;
-		manager->all_tasks.head = manager->all_tasks.head->next;
+		if (task->func != exit_task_entry)
+			manager->all_tasks.head = manager->all_tasks.head->next;
 		pthread_mutex_unlock(manager->all_tasks.mutex);
+
+		// it is a exit task?
+		if (task->func == exit_task_entry)
+		{
+			int j = 0;
+			// terminate recycle thread firstly
+			// ...
+			//
+			// then, terminate all work threads, recycle thread has exited, so
+			// no other thread would own all work threads array, so lock is not need
+			for (i = 0; i < manager->easy_tp->max_pool_size && manager->all_threads.size; i++)
+			{
+				if (manager->all_threads.threads[i].tid != -1)
+				{
+					pthread_mutex_lock(manager->all_threads.threads[i].mutex);
+					manager->all_threads.threads[i].task = task;
+					pthread_mutex_unlock(manager->all_threads.threads[i].mutex);
+					pthread_cond_signal(manager->all_threads.threads[i].cond);
+					manager->all_threads.unused[j++] = i; 
+				}
+			}
+			for (i = 0; i < j; i++)
+			{
+				pthread_join(manager->all_threads.threads[manager->all_threads.unused[i]].tid, NULL);
+			}
+			break;
+		}
 
 		// any idle thread exist? if indeed, let it run the task
 		pthread_mutex_lock(manager->idle_threads.mutex);
@@ -125,28 +163,27 @@ static void *thread_manager_entry(void *arg)
 		if (idle_id == -1)
 		{
 			// no idle thread, try create a new thread and put it to pool
-			pthread_t thread_id;
 			thread_info *ti = NULL;
 			thread_task_arg *arg = (thread_task_arg *)malloc(sizeof(thread_task_arg));
 			pthread_mutex_lock(manager->all_threads.mutex);
 			if (manager->all_threads.size < manager->easy_tp->max_pool_size)
 			{
+				int unused_idx = 0;
 				manager->all_threads.size++;
-				manager->all_threads.unused_size--;
-				ti = &manager->all_threads.threads[manager->all_threads.unused_size];
-				arg->id = manager->all_threads.unused_size;
+				unused_idx = manager->all_threads.unused[--manager->all_threads.unused_size];
+				ti = &manager->all_threads.threads[unused_idx];
 				pthread_mutex_unlock(manager->all_threads.mutex);
 
 				ti->active_cond = (pthread_cond_t *)malloc(sizeof(pthread_cond_t));
 				pthread_cond_init(ti->active_cond, NULL);
 				ti->active_mutex = (pthread_mutex_t *)malloc(sizeof(pthread_mutex_t));
 				pthread_mutex_init(ti->active_mutex, NULL);
-				ti->quit = 0;
 				ti->task = NULL;
 				arg->ti  = ti;
 				arg->man = manager;
-				pthread_create(&thread_id, NULL, thread_task_entry, (void *)arg);
-				idle_id = arg_id;
+				arg->id  = unused_idx;
+				pthread_create(&ti->tid, NULL, thread_task_entry, (void *)arg);
+				idle_id = arg->id;
 			}
 			else   // if can not create a new thread, wait until someone thread becomes idle
 			{
@@ -176,7 +213,6 @@ static void *thread_manager_entry(void *arg)
 easy_thread_pool *easy_thread_pool_init(int init_pool_size, int max_pool_size)
 {
 	int i;
-	pthread_t thread_id;
 	easy_tp_man *manager = (easy_tp_man *)malloc(sizeof(easy_tp_man));
 	
 	manager->easy_tp = (easy_thread_pool *)malloc(sizeof(easy_thread_pool));
@@ -186,8 +222,6 @@ easy_thread_pool *easy_thread_pool_init(int init_pool_size, int max_pool_size)
 	manager->all_threads.size = init_pool_size;
 	manager->all_threads.mutex = (pthread_mutex_t *)malloc(sizeof(pthread_mutex_t));
 	pthread_mutex_init(manager->all_threads.mutex, NULL);
-	manager->all_threads.cond = (pthread_cond_t *)malloc(sizeof(pthread_cond_t));
-	pthread_cond_init(manager->all_threads.cond, NULL);
 	manager->all_threads.threads = (thread_info *)malloc(sizeof(thread_info) * max_pool_size);
 	manager->all_threads.unused = (int *)malloc(sizeof(int) * max_pool_size);
 	for (i = 0; i < manager->all_threads.size; i++)
@@ -197,12 +231,11 @@ easy_thread_pool *easy_thread_pool_init(int init_pool_size, int max_pool_size)
 		pthread_mutex_init(manager->all_threads.thread[i].active_mutex, NULL);
 		manager->all_threads.threads[i].active_cond = (pthread_cond_t *)malloc(sizeof(pthread_cond_t));
 		pthread_cond_init(manager->all_threads.thread[i].active_cond, NULL);
-		manager->all_threads.threads[i].quit = 0;
 		manager->all_threads.threads[i].task = NULL;
 		arg->ti  = &manager->all_threads.threads[i];
 		arg->man = manager;
 		arg->id  = i;
-		pthread_create(&thread_id, NULL, thread_task_entry, (void *)arg);
+		pthread_create(&manager->all_threads.threads[i].tid, NULL, thread_task_entry, (void *)arg);
 	}
 	for (i = manager->all_threads.size; i < max_pool_size; i++)
 		manager->all_threads.unused[i - manager->all_threads.size] = i;
@@ -223,8 +256,45 @@ easy_thread_pool *easy_thread_pool_init(int init_pool_size, int max_pool_size)
 	manager->idle_threads.cond = (pthread_cond_t *)malloc(sizeof(pthread_cond_t));
 	pthread_cond_init(manager->idle_threads.cond, NULL);
 
-	pthread_create(&thread_id, NULL, thread_manager_entry, manager); 
-	return manager->easy_tp;
+	pthread_create(&manager->tid, NULL, thread_manager_entry, manager); 
+	return (easy_thread_pool *)manager;
 }
 
+void easy_thread_pool_add_task(easy_thread_pool *easy_tp, task_func func, task_desc *task_info)
+{
+	int hasFree = 0;
+	easy_tp_man *manager = (easy_tp_man *)easy_tp;
+	task_node *task = (task_node *)malloc(sizeof(task_node));
+	task->func = func;
+	task->desc = task_info;
+	task->next = NULL;
+	pthread_mutex_lock(manager->all_tasks.mutex);
+	if (manager->all_tasks.head == NULL)
+		manager->all_tasks.head = manager->all_tasks.tail = task;
+	else if (manager->all_tasks.tail->func != exit_task_entry)
+	{
+		manager->all_tasks.tail->next = task;
+		manager->all_tasks.tail = task;
+	}
+	else
+		hasFree = 1;
+	pthread_mutex_unlock(manager->all_tasks.mutex);
+	if (!hasFree)
+		pthread_cond_signal(manager->all_tasks.cond);
+}
+
+void easy_thread_pool_free(easy_thread_pool *easy_tp)
+{
+	easy_thread_pool_add_task(easy_tp, exit_task_entry, NULL);
+	easy_tp_man *manager = (easy_tp_man *)easy_tp;
+	pthread_join(manager->tid, NULL);
+
+	pthread_mutex_destroy(manager->idle_threads.mutex);
+	free(manager->idle_threads.mutex);
+	pthread_cond_destroy(manager->idle_thread.cond);
+	free(manager->idle_threads.cond);
+	free(manager->idle_threads.idxs);
+
+	/*pthread_*/
+}
 

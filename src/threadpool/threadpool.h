@@ -19,7 +19,7 @@ easy_thread_pool *
 easy_thread_pool_init(int init_pool_size, int max_pool_size);
 
 void
-easy_thread_pool_add_task(easy_thread_pool *easy_tp, task_func task, task_desc *task_info);
+easy_thread_pool_add_task(easy_thread_pool *easy_tp, task_func func, task_desc *task_info);
 
 void
 easy_thread_pool_free(easy_thread_pool *easy_tp);
