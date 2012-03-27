@@ -1,7 +1,7 @@
 #ifndef __THREAD_POOL_H__
 #define __THREAD_POOL_H__
 
-typedef void (*task_func)(void *);
+typedef void *(*task_func)(void *);
 
 typedef struct
 {
