@@ -5,24 +5,24 @@
 #include <sys/time.h>
 
 
-#define TASK_NUM 20000
+#define TASK_NUM 200
 char *finish_flags;
 void *task_entry_1(void *arg)
 {
 //	printf("I am task %d, task run\n", *(int *)arg);
 	// do something
+	char a = 0;
 	{
 		int i = 0;
-		int a = 0;
-		for (i = 0; i < 100000; i++)
+		for (i = 0; i < 10000000; i++)
 		{
+			// 确保计算不被编译器优化
 			a += i;
 			a /= (i + 1);
 			a *= i;
 		}
-		printf("%d",a);
 	}
-	finish_flags[*(int *)arg] = 1;
+	finish_flags[*(int *)arg] = a? a : 1;
 //	printf("I am task %d, task finished\n", *(int *)arg);
 	return 0;
 }
@@ -42,20 +42,20 @@ int main(int argc, char *argv[])
 	if (argc > 1)
 	{	//single-thread
 		//
-		int a = 0;
+		char a = 0;
 		for (i = 0; i < 20000 * 100000; i++)
 		{
 			a += i;
 			a /= (i + 1);
 			a *= i;
 		}
-		printf("%d",a);
+		printf("%d", a);
 	}
 	else
 	{
 		//multi-thread
 		//
-		easy_thread_pool *tp = easy_thread_pool_init(100, 300);
+		easy_thread_pool *tp = easy_thread_pool_init(2, 320);
 
 		for (i = 0; i < TASK_NUM; i++)
 		{
@@ -80,16 +80,18 @@ int main(int argc, char *argv[])
 	}
 	free(descs);
 
-	for (i = 0; i < TASK_NUM; i++)
+	if (argc == 1)
 	{
-		if (!finish_flags[i])
+		for (i = 0; i < TASK_NUM; i++)
 		{
-			printf("task %d is not finished\n", i);
-			all_finished = 0;
+			if (!finish_flags[i])
+			{
+				printf("task %d is not finished\n", i);
+				all_finished = 0;
+			}
 		}
+		if (all_finished)
+			printf("all task finished successfully\n");
 	}
-	if (all_finished)
-		printf("all task finished successfully\n");
-	pthread_exit(NULL);
 	return 0;
 }
