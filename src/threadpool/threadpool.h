@@ -2,11 +2,13 @@
 #define __THREAD_POOL_H__
 
 typedef void *(*task_func)(void *);
+typedef void (*task_over_func)(void *);
 
 typedef struct
 {
 	void *arg;
 	void *ret;
+	task_over_func fire_task_over;
 } task_desc;
 
 typedef struct easy_thread_pool

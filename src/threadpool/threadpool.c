@@ -123,6 +123,8 @@ static void *thread_task_entry(void *arg)
 		{
 			// ASSERT(ti->task);
 			task->desc->ret = task->func(task->desc->arg);
+			if (task->desc->fire_task_over)
+				task->desc->fire_task_over(task->desc);
 			free(task);
 
 			// become idle
