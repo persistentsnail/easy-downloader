@@ -25,6 +25,9 @@ typedef enum
 	ERR_IO_WRITE      = ERR_CONNECT - 1,
 	ERR_IO_READ       = ERR_IO_WRITE - 1,
 	ERR_RES_NOT_FOUND = ERR_IO_READ - 1,
+
+	ERR_OPEN_TMP_FILE = ERR_RES_NOT_FOUND - 1,
+	ERR_MERGE_FILES   = ERR_OPEN_TMP_FILE - 1,
 }d_err_t;
 
 downloader *easy_dowloader_init();
