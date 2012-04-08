@@ -12,39 +12,53 @@ _task_list	threadpool.c	/^typedef struct _task_list$/;"	s	file:
 _task_node	threadpool.c	/^typedef struct _task_node$/;"	s	file:
 _thread_array	threadpool.c	/^typedef struct _thread_array$/;"	s	file:
 _thread_info	threadpool.c	/^typedef struct _thread_info$/;"	s	file:
-active_cond	threadpool.c	/^	pthread_cond_t *active_cond;$/;"	m	struct:_thread_info	file:
+_thread_task_arg	threadpool.c	/^typedef struct _thread_task_arg$/;"	s	file:
+active_cond	threadpool.c	/^	pthread_cond_t  *active_cond;$/;"	m	struct:_thread_info	file:
+active_mutex	threadpool.c	/^	pthread_mutex_t *active_mutex;$/;"	m	struct:_thread_info	file:
 all_tasks	threadpool.c	/^	task_list         all_tasks;$/;"	m	struct:_easy_thread_pool_manager	file:
 all_threads	threadpool.c	/^	thread_array      all_threads;$/;"	m	struct:_easy_thread_pool_manager	file:
 arg	threadpool.h	/^	void *arg;$/;"	m	struct:__anon1
 cond	threadpool.c	/^	pthread_cond_t    *cond;$/;"	m	struct:_idle_thread_id_array	file:
-cond	threadpool.c	/^	pthread_cond_t    *cond;$/;"	m	struct:_thread_array	file:
-desc	threadpool.c	/^	task_desc         *desc;$/;"	m	struct:_task_node	file:
+desc	threadpool.c	/^	task_desc                *desc;$/;"	m	struct:_task_node	file:
 easy_thread_pool	threadpool.h	/^typedef struct easy_thread_pool$/;"	s
 easy_thread_pool	threadpool.h	/^} easy_thread_pool;$/;"	t	typeref:struct:easy_thread_pool
+easy_thread_pool_add_task	threadpool.c	/^void easy_thread_pool_add_task(easy_thread_pool *easy_tp, task_func func, task_desc *task_info)$/;"	f
+easy_thread_pool_free	threadpool.c	/^void easy_thread_pool_free(easy_thread_pool *easy_tp)$/;"	f
 easy_thread_pool_init	threadpool.c	/^easy_thread_pool *easy_thread_pool_init(int init_pool_size, int max_pool_size)$/;"	f
-easy_tp	threadpool.c	/^	easy_thread_pool  *easy_tp;$/;"	m	struct:_easy_thread_pool_manager	file:
+easy_tp	threadpool.c	/^	easy_thread_pool  easy_tp;$/;"	m	struct:_easy_thread_pool_manager	file:
 easy_tp_man	threadpool.c	/^}easy_tp_man;$/;"	t	typeref:struct:_easy_thread_pool_manager	file:
-func	threadpool.c	/^	task_func         func;$/;"	m	struct:_task_node	file:
+exit_task_entry	threadpool.c	/^static void *exit_task_entry(void *arg)$/;"	f	file:
+func	threadpool.c	/^	task_func                func;$/;"	m	struct:_task_node	file:
 head	threadpool.c	/^	task_node         *head;$/;"	m	struct:_task_list	file:
+id	threadpool.c	/^	int                    id;$/;"	m	struct:_thread_task_arg	file:
 idle_thread_array	threadpool.c	/^}idle_thread_array;$/;"	t	typeref:struct:_idle_thread_id_array	file:
 idle_threads	threadpool.c	/^	idle_thread_array idle_threads;$/;"	m	struct:_easy_thread_pool_manager	file:
 idxs	threadpool.c	/^	int               *idxs;$/;"	m	struct:_idle_thread_id_array	file:
 init_pool_size	threadpool.h	/^	int init_pool_size;$/;"	m	struct:easy_thread_pool
+main	test.c	/^int main(int argc, char *argv[])$/;"	f
+man	threadpool.c	/^	easy_tp_man           *man;$/;"	m	struct:_thread_task_arg	file:
 max_pool_size	threadpool.h	/^	int max_pool_size;$/;"	m	struct:easy_thread_pool
 mutex	threadpool.c	/^	pthread_mutex_t   *mutex;$/;"	m	struct:_idle_thread_id_array	file:
 mutex	threadpool.c	/^	pthread_mutex_t   *mutex;$/;"	m	struct:_task_list	file:
 mutex	threadpool.c	/^	pthread_mutex_t   *mutex;$/;"	m	struct:_thread_array	file:
-next	threadpool.c	/^	_task_node        *next;$/;"	m	struct:_task_node	file:
-quit	threadpool.c	/^	int quit;$/;"	m	struct:_thread_info	file:
+next	threadpool.c	/^	struct _task_node        *next;$/;"	m	struct:_task_node	typeref:struct:_task_node::_task_node	file:
 ret	threadpool.h	/^	void *ret;$/;"	m	struct:__anon1
 size	threadpool.c	/^	int               size;$/;"	m	struct:_idle_thread_id_array	file:
 size	threadpool.c	/^	int               size;$/;"	m	struct:_thread_array	file:
 tail	threadpool.c	/^	task_node         *tail;$/;"	m	struct:_task_list	file:
+task	threadpool.c	/^	task_node       *task;$/;"	m	struct:_thread_info	file:
 task_desc	threadpool.h	/^} task_desc;$/;"	t	typeref:struct:__anon1
-task_func	threadpool.h	/^typedef void (*task_func)(void *);$/;"	t
+task_func	threadpool.h	/^typedef void *(*task_func)(void *);$/;"	t
 task_list	threadpool.c	/^}task_list;$/;"	t	typeref:struct:_task_list	file:
 task_node	threadpool.c	/^}task_node;$/;"	t	typeref:struct:_task_node	file:
 thread_array	threadpool.c	/^}thread_array;$/;"	t	typeref:struct:_thread_array	file:
-thread_entry	threadpool.c	/^	void *(*thread_entry)(void*);$/;"	m	struct:_thread_info	file:
 thread_info	threadpool.c	/^}thread_info;$/;"	t	typeref:struct:_thread_info	file:
-threads	threadpool.c	/^	thread_info threads[MAX_THREADS_ALLOWED];$/;"	m	struct:_thread_array	file:
+thread_manager_entry	threadpool.c	/^static void *thread_manager_entry(void *arg)$/;"	f	file:
+thread_task_arg	threadpool.c	/^}thread_task_arg;$/;"	t	typeref:struct:_thread_task_arg	file:
+thread_task_entry	threadpool.c	/^static void *thread_task_entry(void *arg)$/;"	f	file:
+threads	threadpool.c	/^	thread_info       *threads;$/;"	m	struct:_thread_array	file:
+ti	threadpool.c	/^	thread_info           *ti;$/;"	m	struct:_thread_task_arg	file:
+tid	threadpool.c	/^	pthread_t         tid;$/;"	m	struct:_easy_thread_pool_manager	file:
+tid	threadpool.c	/^	pthread_t        tid;$/;"	m	struct:_thread_info	file:
+unused	threadpool.c	/^	int               *unused;$/;"	m	struct:_thread_array	file:
+unused_size	threadpool.c	/^	int               unused_size;$/;"	m	struct:_thread_array	file:

@@ -60,8 +60,8 @@ int main(int argc, char *argv[])
 		for (i = 0; i < TASK_NUM; i++)
 		{
 			descs[i].arg = malloc(sizeof(int));
-			descs[i].ret = malloc(sizeof(int));
 			*(int *)descs[i].arg = i;
+			descs[i].fire_task_over = NULL;
 
 			easy_thread_pool_add_task(tp, task_entry_1, &descs[i]);
 		}
@@ -76,7 +76,6 @@ int main(int argc, char *argv[])
 	for (i = 0; i < TASK_NUM; i++)
 	{
 		free(descs[i].arg);
-		free(descs[i].ret);
 	}
 	free(descs);
 

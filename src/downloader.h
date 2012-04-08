@@ -1,6 +1,9 @@
 #ifndef __DOWNLOADER_H__
 #define __DOWNLOADER_H__
 
+#include <limits.h>
+#define MAX_URL_LEN        256 + 32
+
 typedef struct _downloader
 {
 	int unused;
@@ -21,7 +24,7 @@ typedef struct _download_breakpoint
 
 typedef void *(*d_callback)(void *);
 
-downloader *easy_dowloader_init();
+downloader *easy_downloader_init();
 
 void easy_downloader_add_task(downloader *inst, const char *url, const char *file_saved_path, 
 		d_callback finished, d_callback progress);
