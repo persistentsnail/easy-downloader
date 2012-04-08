@@ -7,10 +7,13 @@
 #include <sys/stat.h>
 #include <errno.h>
 
+#include <sqlite3.h>
+
 #include <sys/types.h>
 
 #define TMP_DIR                    ".easy_downloader"
 #define TMP_FILE_SUFFIX_FMT        "._tmp_%d"
+#define DB_FILE_NAME               "downloader_db"
 
 
 #define MAX_URL_LEN        256 + 32
@@ -19,25 +22,61 @@
 #define MAX_PART_NUMBER    15
 #define MIN_PART_SIZE      1024 * 256     // 256K
 						
+// SQL syntax
+#define SQL_CREATE_TABLE  "create table if not exist d_breakpoints ("   \
+                          "file_name varchar(255), "                     \
+						  "file_url  varchar(255), "                     \
+						  "file_saved_path varchar(255), "               \
+						  "file_length INT, "                            \
+						  "tmp_file_name_fmt varchar(255), "             \
+						  "parts TINYINT, "                              \
+						  "average_len INT, "                            \
+						  "last_part_len INT)"                           \
+
+#define SQL_INSERT_VALUES  "inert into d_breakpoint_i values ("           \
+                           "%s, %s, %s, %d, %s, %d, %d, %d)"              \
+
+#define SQL_QUERY_TABLE    "select * from d_breakpoints where file_name=%s"
+
+#define SQL_QUERY_ALL      "select file_name, file_saved_path, file_length, tmp_file_name_fmt," \
+                           "parts from d_breakpoints"                                           \
 
 char download_tmp_path[PATH_MAX];
 char file_saved_def_path[PATH_MAX];
+
+typedef enum
+{
+	ERR_OK            = 0,
+	ERR_FALSE         = -1,
+
+	ERR_URL           = ERR_FALSE  - 1,
+	ERR_CONNECT       = ERR_URL - 1,
+	ERR_IO_WRITE      = ERR_CONNECT - 1,
+	ERR_IO_READ       = ERR_IO_WRITE - 1,
+	ERR_RES_NOT_FOUND = ERR_IO_READ - 1,
+
+	ERR_OPEN_TMP_FILE = ERR_RES_NOT_FOUND - 1,
+	ERR_MERGE_FILES   = ERR_OPEN_TMP_FILE - 1,
+}d_err_t;
+
 
 typedef struct _downloader_manager
 {
 	downloader            inst;
 	easy_thread_pool      *tp;
+	sqlite3               *db_key;
 }d_manager_t;
-
 
 typedef struct _downloader_task
 {
 	d_manager_t        *dm;
+
 	char               url[MAX_URL_LEN];
 	char               file_saved_path[PATH_MAX];
+	char               tmp_file_name_fmt[PATH_MAX];    // "filename._tmp_%d"
+
 	d_callback         finished_callback;
 	d_callback         progress_callback;
-	const char         *tmp_file_name_fmt;    // "filename._tmp_%d"
 
 	pthread_mutex_t    *mutex;
 	pthread_cond_t     *cond;
@@ -69,8 +108,47 @@ typedef struct _part_info
 	d_task_t       *d_task;
 
 	int            id;
+}part_info_t;
+
+static int db_connect(sqlite **pkey)
+{
+	char *err_msg;
+	int rc = sqlite3_open(DB_FILE_NAME, pkey);
+	if (rc)
+	{
+		fprintf(stderr, "Can't open database: %s\n", sqlite3_errmsg(*pkey));
+		sqlite3_close(*pkey);
+		return -1;
+	}
+	rc = sqlite3_exec(*pkey, SQL_CREATE_TABLE, NULL, 0, &err_msg);
+	if (rc != SQLITE_OK)
+	{
+		fprintf(stderr, "SQL error: %s\n", err_msg);
+		sqlite3_free(err_msg);
+		sqlite3_close(*pkey);
+		return -1;
+	}
+	return 0;
 }
-	
+
+static int db_execute(sqlite3 *db_key, const char *sql_str, 
+		int (*callback)(void*, int, char**, char**))
+{
+	char *err_msg;
+	int rc = sqlite3_exec(db_key, sql_str, callback, 0, &err_msg);
+	if (rc != SQLITE_OK)
+	{
+		fprintf(stderr, "SQL error: %s\n", err_msg);
+		sqlite3_free(err_msg);
+		return -1;
+	}
+	return 0;
+}
+
+static void db_close(sqlite3 *db_key)
+{
+	sqlite3_close(db_key);
+}
 
 static int parse_url(const char *url, d_url_t *d_url)
 {
@@ -200,7 +278,7 @@ static int write_n_char(int fd, char *in_chars, int n)
 						  "Pragma: no-cache\r\n"  \
 						  "Cache-control: no-cache\r\n"       \
 
-static int request_download_file(const char *url, file_info_t *file)
+static int request_download_file(const char *url, file_info_t *file, char *url_redirect)
 {
 	int connfd;
 	d_url_t d_url;
@@ -252,7 +330,7 @@ static int request_download_file(const char *url, file_info_t *file)
 			{
 				char url[MAX_URL_LEN];
 				sscanf(ptr, "Location: %s", url);
-				return request_download_file(url, file);
+				return request_download_file(url, file, url_redirect);
 			}
 
 			// file size
@@ -263,6 +341,7 @@ static int request_download_file(const char *url, file_info_t *file)
 				sscanf(ptr, "Content-Length: %d", length);
 				if (length < 0)
 					return -1;
+				strcpy(url_redirect, url);
 				memcpy(&file->d_url, &d_url, sizeof(d_url));
 				file->length = length;
 				return 0;
@@ -278,8 +357,11 @@ static void download_progress(d_task_t *d_task, int bytes_recv, int bytes_total)
 	d_task->len_downloaded += bytes_recv;
 	pthread_mutex_unlock(d_task->mutex);
 
-	d_progress_t pt = { d_task->len_downloaded, bytes_total };
-	d_task->progress_callback(&pt);
+	if (d_task->progress_callback)
+	{
+		d_progress_t pt = { d_task->len_downloaded, bytes_total };
+		d_task->progress_callback(&pt);
+	}
 	pthread_cond_signal(d_task->cond);
 }
 
@@ -379,7 +461,7 @@ static void *download_part_entry(void *arg)
 	}
 }
 
-void make_unique_file_name(const char *name_in, char *name_out, int max)
+static void make_unique_file_name(const char *name_in, char *name_out, int max)
 {
 	char fmt[64];
 	char *psuffix = NULL, ptr;
@@ -483,20 +565,71 @@ MERGE_FAILED:
 	return ERR_FALSE;
 }
 
+static void dispatch_part_download(d_task_t *d_task, file_info_t *file, 
+		int per_part_len, int last_part_len, int parts)
+{
+	int i;
+	int offset = 0;
+	// allocate on stack
+	task_desc descs[MAX_PART_NUMBER];
+	part_info_t parts_info[MAX_PART_NUMBER];
+	char tmp_file_name[PATH_MAX];
+	int part_downloaded_len = 0;
+	struct stat sb;
+	int ret;
+
+	for (i = 0; i < parts; i++)
+	{
+		descs[i].arg = &parts_info[i];
+		descs[i].fire_task_over = NULL;
+		parts_info[i].beg_pos = offset;
+		if (i == parts - 1 && last_part_len > 0)
+			offset += last_part_len;
+		else
+			offset += per_part_len;
+		parts_info[i].end_pos = offset - 1;
+		parts_info[i].d_task  = d_task;
+		parts_info[i].file    = file;
+		parts_info[i].id      = i;
+
+		snprintf(tmp_file_name, PATH_MAX, d_task->tmp_file_name_fmt, i);
+		ret = stat(tmp_file_name, &sb);
+		if (ret != 0 && errno != ENOENT)
+		{
+			perror("stat file size failed:");
+			return;
+		}
+		if (ret == 0)
+		{
+			parts_info[i].beg_pos += sb.st_size;
+			d_task->len_downloaded += sb.st_size;
+		}
+		if (parts_info[i].end_pos - parts_info[i].beg_pos + 1 > 0)
+			easy_thread_pool_add_task(d_task->dm->tp, download_part_entry, &descs[i]);
+	}
+
+	pthread_mutex_lock(d_task->mutex);
+	while (d_task->len_downloaded < file.length)
+		pthread_cond_wait(d_task->cond, d_task->mutex);
+	pthread_mutex_unlock(d_task->mutex);
+
+	// save downloaded file
+	if (merge_files(file, d_task, parts_info, parts) < 0)
+		return ERR_MERGE_FILES;
+	if (d_task->finished_callback)
+		d_task->finished_callback();
+}
+
 static void *download_entry(void *arg)
 {
 	d_task_t *d_task = (d_task_t *)arg;
 	file_info_t file;
-	char tmp_file_name_fmt[PATH_MAX];
+	char sql_buf[256];
+	char real_url[MAX_URL_LEN];
 
-	// allocate on stack
-	task_desc descs[MAX_PART_NUMBER];
-	part_info_t parts_info[MAX_PART_NUMBER];
-
-	if (request_download_file(arg->url, &file) == 0)
+	if (request_download_file(d_task->url, &file, real_url) == 0)
 	{
 		int i = 0;
-		int offset = 0;
 		int parts = 0, per_part_len = 0, last_part_len = 0;
 		if (MIN_PART_SIZE * MAX_PART_NUMBER >= file.length)
 		{
@@ -510,70 +643,79 @@ static void *download_entry(void *arg)
 		{
 			parts = MAX_PART_NUMBER;
 			per_part_len = file.length / parts;
-			last_part_len = file/length - parts * per_part_len + per_part_len;
+			last_part_len = file.length - parts * per_part_len;
+			if (last_part_len > 0)
+				last_part_len += per_part_len;
 		}
 		
-		strcpy(tmp_file_name_fmt, file.d_url.filename);
-		strcat(tmp_file_name_fmt, TMP_FILE_SUFFIX_FMT);
-		make_unique_file_name(tmp_file_name_fmt, tmp_file_name_fmt, PATH_MAX); // filename.ext(n)._tmp_%d
-		d_task->tmp_file_name_fmt = tmp_file_name_fmt;
+		strcpy(d_task->tmp_file_name_fmt, file.d_url.filename);
+		strcat(d_task->tmp_file_name_fmt, TMP_FILE_SUFFIX_FMT);
+		make_unique_file_name(d_task->tmp_file_name_fmt, d_task->tmp_file_name_fmt, PATH_MAX); // filename.ext(n)._tmp_%d
 
-		for (i = 0; i < parts; i++)
-		{
-			descs[i].arg = &parts_info[i];
-			descs[i].fire_task_over = NULL;
-			parts_info[i].beg_pos = offset;
-			if (i == parts - 1 && last_part_len > 0)
-				offset += last_part_len;
-			else
-				offset += per_part_len;
-			parts_info[i].end_pos = offset - 1;
-			parts_info[i].d_task  = d_task;
-			parts_info[i].file    = &file;
-			parts_info[i].id      = i;
-		}
+		// save this task to db file
+		snprintf(sql_buf, sizeof(sql_buf), SQL_INSERT_VALUES, file.d_url.filename, 
+				real_url, d_task->file_saved_path, file.length, d_task->tmp_file_name_fmt, parts,
+				per_part_len, last_part_len);
+		db_execute(d_task->dm->db_key, sql_buf, NULL);
 
-		for (i = 0; i < parts; i++)
-			easy_thread_pool_add_task(d_task->dm->tp, download_part_entry, &descs[i]);
-
-		pthread_mutex_lock(d_task->mutex);
-		while (d_task->len_downloaded < file.length)
-			pthread_cond_wait(d_task->cond, d_task->mutex);
-		pthread_mutex_unlock(d_task->mutex);
-
-		// save downloaded file
-		if (merge_files(&file, d_task, parts_info, parts) < 0)
-			return ERR_MERGE_FILES;
-		if (d_task->finished_callback)
-			d_task->finished_callback();
+		dispatch_part_download(d_task, &file, per_part_len, last_part_len, parts);
 	}
+
 }
 
-downloader *easy_downloader_init()
+static void *recover_entry(void *arg)
 {
-	int ret;
-	snprintf(download_tmp_path, PATH_MAX, "%s/%s/", getenv("HOME"), TMP_DIR);
-	ret = mkdir(download_tmp_path, S_IRWXU);
-	if (ret != 0 && errno != EEXIST)
-		return NULL;
-	chdir(download_tmp_path);
-	d_manager_t *manager = (d_manager_t *)malloc(sizeof(d_manager_t));
-	manager->tp = easy_thread_pool_init(5, 60);
+	d_task_t *d_task = (d_task_t *)arg;
+	file_info_t file;
 
-	if (file_saved_def_path[0] == '\0')
+	char **results;
+	int row,col;
+	char *err_msg;
+	char sql_buf[256];
+	int ret, i, parts;
+	int per_part_len, last_part_len;
+
+	snprintf(sql_buf, sizeof(sql_buf), SQL_QUERY_TABLE, file_name);
+	ret = sqlite3_get_table(manager->db_key, sql_buf, &results, &row, &col, &err_msg);
+	if (ret != SQLITE_OK)
 	{
-		strcpy(file_saved_def_path, getenv("HOME"));
-		strcat(file_saved_def_path, "/");
+		fprintf(stderr, "SQL error: %s\n", err_msg);
+		sqlite3_free(err_msg);
+		return -1;
 	}
-	return (downloader *)manager;
+	if (row != 1 || col != 8)
+		return -1;
+	i = col + 1;
+
+	// file_url
+	if (parse_url(results[i++], &file.d_url) < 0)
+		return -1;
+
+	// file_saved_path
+	strncpy(d_task->file_saved_path, results[i++], PATH_MAX);
+
+	// file_length
+	sscanf(results[i++], "%d", &file.length);
+
+	// tmp_file_name_fmt
+	strncpy(d_task->tmp_file_name_fmt, results[i++], PATH_MAX);
+
+	// parts
+	sscanf(results[i++], "%d", &parts);
+
+	// average_len
+	sscanf(results[i++], "%d", &per_part_len);
+
+	// last_part_len
+	sscanf(results[i++], "%d", &last_part_len);
+	
+	sqlite3_free_table(&result);
+
+	dispatch_part_download(d_task, &file, per_part_len, last_part_len, parts);
 }
 
-void easy_downloader_add_task(downloader *inst, const char *url, const char *file_saved_path/*last char is '/'*/,
-		d_callback finished, d_callback progress)
+static void download_task_init(d_task_t *d_task, d_callback_t finished, d_callback_t progress)
 {
-	d_manager_t *manager = (d_manager_t *)inst;
-
-	d_task_t *d_task = (d_task_t *)malloc(sizeof(d_task_t));
 	d_task->mutex             = (pthread_mutex_t *)malloc(sizeof(pthread_mutex_t));
 	d_task->cond              = (pthread_cond_t *)malloc(sizeof(pthread_cond_t));
 	pthread_mutex_init(d_task->mutex, NULL);
@@ -581,12 +723,58 @@ void easy_downloader_add_task(downloader *inst, const char *url, const char *fil
 	d_task->len_downloaded    = 0;
 	d_task->finished_callback = finished;
 	d_task->progress_callback = progress;
+}
+
+downloader *easy_downloader_init()
+{
+	int ret;
+
+	sqlite3 *db_key;	
+	snprintf(download_tmp_path, PATH_MAX, "%s/%s/", getenv("HOME"), TMP_DIR);
+
+	ret = mkdir(download_tmp_path, S_IRWXU);
+	if (ret != 0 && errno != EEXIST)
+		return NULL;
+	chdir(download_tmp_path);
+
+	if (!(ret = db_connect(&db_key)))
+		return NULL;
+
+	d_manager_t *manager = (d_manager_t *)malloc(sizeof(d_manager_t));
+	manager->tp = easy_thread_pool_init(5, 60);
+	manager->db_key = db_key;
+
+	if (file_saved_def_path[0] == '\0')
+	{
+		strcpy(file_saved_def_path, getenv("HOME"));
+		strcat(file_saved_def_path, "/");
+	}
+		
+	return (downloader *)manager;
+}
+
+void easy_downloader_destroy(downloader *inst)
+{
+	d_manager_t *manager = (d_manager_t *)inst;
+	easy_thread_pool_free(manager->tp);
+	db_close(manager->db_key);
+	free(manager);
+}
+
+
+void easy_downloader_add_task(downloader *inst, const char *url, const char *file_saved_path/*last char is '/'*/,
+		d_callback finished, d_callback progress)
+{
+	d_manager_t *manager = (d_manager_t *)inst;
+
+	d_task_t *d_task = (d_task_t *)malloc(sizeof(d_task_t));
+	download_task_init(d_task, finished, progress);
 	d_task->dm                = manager;
 
 	strncpy(d_task->url, url, MAX_URL_LEN);
 	d_task->url[MAX_URL_LEN - 1] = '\0';
 
-	strncpy(d_task->file_saved_path, file_saved_path?file_saved_path:file_saved_def_path, PATH_MAX);
+	strncpy(d_task->file_saved_path, file_saved_path ? file_saved_path : file_saved_def_path, PATH_MAX);
 	d_task->file_saved_path[PATH_MAX - 1] = '\0';
 
 	task_desc *desc = (task_desc *)malloc(sizeof(task_desc));
@@ -594,3 +782,73 @@ void easy_downloader_add_task(downloader *inst, const char *url, const char *fil
 	desc->fire_task_over = free_task;
 	easy_thread_pool_add_task(manager->tp, download_entry, desc);
 }
+
+void easy_downloader_recover_task(downloader *inst, const char *file_name, d_callback finished,
+		d_callback progress)
+{
+	d_manager_t *manager = (d_manager_t *)inst;
+	d_task_t *d_task = (d_task_t *)malloc(sizeof(d_task_t));
+	download_task_init(d_task, finished, progress);
+	d_task->dm                = manager;
+
+	task_desc *desc = (task_desc *)malloc(sizeof(task_desc));
+	desc->arg = d_task;
+	desc->fire_task_over = free_task;
+	easy_thread_pool_add_task(manager->tp, recover_entry, desc);
+
+	return 0;
+}
+
+static void get_ith_breakpoint(d_breakpoint_t *bp, char **results, int i)
+{
+	char tmp_file_name_fmt[PATH_MAX];
+	int parts, j;
+	// file_saved_path file_name
+	strncpy(bp->file_name, results[i+1], PATH_MAX);
+	strcat(bp->file_name, results[i]);
+	i += 2;
+
+	// file_length
+	sscanf(results[i++], "%d", &bp->file_length);
+
+	// tmp_file_name_fmt
+	strncpy(tmp_file_name_fmt, results[i++], PATH_MAX);
+
+	// parts
+	sscanf(results[i++], "%d", &parts);
+
+	bp->len_downloaded = 0;
+	for (j = 0; j < parts; j++)
+	{
+		struct stat sb;
+		char tmp_file_name[PATH_MAX];
+		snprintf(tmp_file_name, PATH_MAX, tmp_file_name_fmt, j);
+		if (stat(tmp_file_name, &sb) == 0)
+			bp->len_downloaded += sb.st_size;
+	}
+}
+
+int easy_downloader_get_breakpoints(downloader *inst, d_breakpoint_t *bps, int max)
+{
+	d_manager_t *manager = (d_manager_t *)inst;
+	char **result;
+	int row, col, i, j = 0;
+	char *err_msg;
+
+	if (SQLITE_OK != sqlite3_get_table(manager->db_key, SQL_QUERY_ALL, 
+				&result, &row, &col, &err_msg))
+	{
+		fprintf(stderr, "SQL error: %s\n", err_msg);
+		sqlite3_free(err_msg);
+		return -1;
+	}
+
+	for (i = 0; i < row && i < max; i++)
+	{
+		j += col;
+		get_ith_breakpoint(&bps[i], result, j);
+	}
+	sqlite3_free_table(result);
+	return i;
+}
+
