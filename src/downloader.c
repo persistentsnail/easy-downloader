@@ -29,7 +29,7 @@
 #define MIN_PART_SIZE      1024 * 256     // 256K
 						
 // SQL syntax
-#define SQL_CREATE_TABLE  "create table if not exist d_breakpoints ("   \
+#define SQL_CREATE_TABLE  "create table if not exists d_breakpoints ("   \
                           "file_name varchar(255), "                     \
 						  "file_url  varchar(255), "                     \
 						  "file_saved_path varchar(255), "               \
@@ -39,34 +39,36 @@
 						  "average_len INT, "                            \
 						  "last_part_len INT)"                           \
 
-#define SQL_INSERT_VALUES  "inert into d_breakpoint_i values ("           \
-                           "%s, %s, %s, %d, %s, %d, %d, %d)"              \
+#define SQL_INSERT_VALUES  "insert into d_breakpoints values ("           \
+                           "'%s', '%s', '%s', '%d', '%s', %d, %d, %d)"              \
 
-#define SQL_QUERY_TABLE    "select * from d_breakpoints where file_name=%s"
+#define SQL_QUERY_TABLE    "select * from d_breakpoints where file_name='%s'"
 
 #define SQL_QUERY_ALL      "select file_name, file_saved_path, file_length, tmp_file_name_fmt," \
-                           "parts from d_breakpoints"                                           \
+                           " parts from d_breakpoints"                                           \
+
+#define SQL_DEL_FILE       "delete from d_breakpoints where file_name is '%s' and file_saved_path is '%s'"
 
 char download_tmp_path[PATH_MAX];
 char file_saved_def_path[PATH_MAX];
 
-typedef enum
-{
-	ERR_OK            = 0,
-	ERR_FALSE         = -1,
+// ERR MACRO
+#define	ERR_OK              0
+#define	ERR_FALSE          -1
 
-	ERR_URL           = ERR_FALSE  - 1,
-	ERR_CONNECT       = ERR_URL - 1,
-	ERR_IO_WRITE      = ERR_CONNECT - 1,
-	ERR_IO_READ       = ERR_IO_WRITE - 1,
-	ERR_RES_NOT_FOUND = ERR_IO_READ - 1,
+#define ERR_URL            -2
+#define ERR_CONNECT        -3
+#define ERR_IO_WRITE       -4
+#define ERR_IO_READ        -5
+#define ERR_RES_NOT_FOUND  -6
 
-	ERR_OPEN_TMP_FILE = ERR_RES_NOT_FOUND - 1,
-	ERR_MERGE_FILES   = ERR_OPEN_TMP_FILE - 1,
-	ERR_REQUEST_RANGE = ERR_MERGE_FILES - 1,
-}d_err_t;
+#define ERR_OPEN_TMP_FILE  -7
+#define ERR_MERGE_FILES    -8
+#define ERR_REQUEST_RANGE  -9
+#define ERR_DB_CONNECT     -10
+#define ERR_DB_EXCUTE      -11
 
-
+#define ERR_RET_VAL        ((void*)(-1))
 typedef struct _downloader_manager
 {
 	downloader            inst;
@@ -105,6 +107,7 @@ typedef struct _file_info
 {
 	d_url_t       d_url;
 	int           length;
+	char          filename[PATH_MAX];
 }file_info_t;
 
 typedef struct _part_info
@@ -125,7 +128,7 @@ static int db_connect(sqlite3 **pkey)
 	{
 		fprintf(stderr, "Can't open database: %s\n", sqlite3_errmsg(*pkey));
 		sqlite3_close(*pkey);
-		return -1;
+		return ERR_DB_CONNECT;
 	}
 	rc = sqlite3_exec(*pkey, SQL_CREATE_TABLE, NULL, 0, &err_msg);
 	if (rc != SQLITE_OK)
@@ -133,7 +136,7 @@ static int db_connect(sqlite3 **pkey)
 		fprintf(stderr, "SQL error: %s\n", err_msg);
 		sqlite3_free(err_msg);
 		sqlite3_close(*pkey);
-		return -1;
+		return ERR_DB_CONNECT;
 	}
 	return 0;
 }
@@ -147,7 +150,7 @@ static int db_execute(sqlite3 *db_key, const char *sql_str,
 	{
 		fprintf(stderr, "SQL error: %s\n", err_msg);
 		sqlite3_free(err_msg);
-		return -1;
+		return ERR_DB_EXCUTE;
 	}
 	return 0;
 }
@@ -201,6 +204,7 @@ static int parse_url(const char *url, d_url_t *d_url)
 
 	if (!(d_url->filename = strrchr(d_url->path, '/')))
 		return ERR_URL;
+	d_url->filename++;
 	return 0;
 }
 
@@ -257,7 +261,7 @@ static int connect_server(const d_url_t *d_url)
 static int write_n_chars(int fd, char *in_chars, int n)
 {
 	int ntotal = n;
-	while (n >= 0)
+	while (n > 0)
 	{
 		int nwritten = write(fd, in_chars, n);
 		if (nwritten < 0)
@@ -265,7 +269,7 @@ static int write_n_chars(int fd, char *in_chars, int n)
 		n -= nwritten;
 		in_chars += nwritten;
 	}
-	return n - ntotal;
+	return ntotal - n;
 }
 
 #define CONNECT_STR_FMT_1 "GET %s HTTP/1.1\r\n"   \
@@ -275,7 +279,7 @@ static int write_n_chars(int fd, char *in_chars, int n)
 						  "Accept: */*\r\n"       \
 						  "Pragma: no-cache\r\n"  \
 						  "Cache-control: no-cache\r\n"       \
-						  "Connection: close\r\n" \
+						  "Connection: close\r\n\r\n" \
 
 #define CONNECT_STR_FMT_2 "GET %s HTTP/1.1\r\n"   \
                           "Host: %s\r\n"          \
@@ -284,26 +288,30 @@ static int write_n_chars(int fd, char *in_chars, int n)
 						  "Accept: */*\r\n"       \
 						  "Range: bytes=%d-%d\r\n"\
 						  "Pragma: no-cache\r\n"  \
-						  "Cache-control: no-cache\r\n"       \
+						  "Cache-control: no-cache\r\n\r\n"       \
 
 static int request_download_file(const char *url, file_info_t *file, char *url_redirect)
 {
 	int connfd;
-	d_url_t d_url;
-	int ret = parse_url(url, &d_url);
+	d_url_t *d_url = &file->d_url;
+	int ret = parse_url(url, d_url);
 	static int redirect_times = 0;
 
 	if (ret < 0)
 		return ret;
-	if ((connfd = connect_server(&d_url)) < 0)
+	if ((connfd = connect_server(d_url)) < 0)
 		return connfd;
 
-	if (strcmp(d_url.scheme, "http:") == 0)
+	if (strcmp(d_url->scheme, "http:") == 0)
 	{
 		{
 			char request[MAX_BUFFER_LEN];
 
-			snprintf(request, MAX_BUFFER_LEN, CONNECT_STR_FMT_1, d_url.path, d_url.host, d_url.host);
+			snprintf(request, MAX_BUFFER_LEN, CONNECT_STR_FMT_1, d_url->path, d_url->host, d_url->host);
+
+//#if debug
+			/*printf("request is %s", request);*/
+//#endif
 			if (write_n_chars(connfd, request, strlen(request)) != strlen(request))
 			{	
 				close(connfd);
@@ -321,7 +329,9 @@ static int request_download_file(const char *url, file_info_t *file, char *url_r
 			if (nread < 0)
 				return ERR_IO_READ;
 			response[nread] = '\0';
-
+//#if debug
+			/*printf("response is %s", response);*/
+//#endif
 			if (!(ptr = strstr(response, "HTTP/1.")))
 				return ERR_FALSE;
 			memcpy(status, ptr + strlen("HTTP/1.1 "), 3);
@@ -329,7 +339,7 @@ static int request_download_file(const char *url, file_info_t *file, char *url_r
 			if (strcmp(status, "404") == 0)
 			{
 				fprintf(stderr, "downloader recieved http response with failed status code %s\n", status);
-				return -1;
+				return ERR_REQUEST_RANGE;
 			}
 
 			// redirect
@@ -346,11 +356,12 @@ static int request_download_file(const char *url, file_info_t *file, char *url_r
 			if (ptr)
 			{
 				int length;
-				sscanf(ptr, "Content-Length: %d", &length);
+				ptr += strlen("Content-Length:");
+				sscanf(ptr, "%d", &length);
+				printf("file length is %d\n", length);
 				if (length < 0)
-					return -1;
+					return ERR_REQUEST_RANGE;
 				strcpy(url_redirect, url);
-				memcpy(&file->d_url, &d_url, sizeof(d_url));
 				file->length = length;
 				return 0;
 			}
@@ -376,11 +387,13 @@ static void download_progress(d_task_t *d_task, int bytes_recv, int bytes_total)
 static void *download_part_entry(void *arg)
 {
 	part_info_t *part = (part_info_t *)arg;
-	int connfd = connect_server(&part->file->d_url);
+
+BEGIN_DOWN:
+{	int connfd = connect_server(&part->file->d_url);
 	if (connfd < 0)
 	{
 		fprintf(stderr, "download part %d-%d connect to srv failed\n", part->beg_pos, part->end_pos);
-		return ERR_CONNECT;
+		return ERR_RET_VAL;
 	}
 	{
 		char request[MAX_BUFFER_LEN];
@@ -393,18 +406,18 @@ static void *download_part_entry(void *arg)
 		if (strlen(request) != write_n_chars(connfd, request, strlen(request)))
 		{
 			close(connfd);
-			return ERR_IO_WRITE;
+			return ERR_RET_VAL;
 		}
 		if ((nread = read(connfd, response, MAX_BUFFER_LEN)) < 0)
 		{
 			close(connfd);
-			return ERR_IO_READ;
+			return ERR_RET_VAL;
 		}
 		response[nread] = '\0';
 		if (!(ptr = strstr(response, "HTTP/1.")))
 		{
 			close(connfd);
-			return ERR_FALSE;
+			return ERR_RET_VAL;
 		}
 			
 		memcpy(status, ptr + strlen("HTTP/1.1 "), 3);
@@ -413,50 +426,55 @@ static void *download_part_entry(void *arg)
 		{
 			close(connfd);
 			fprintf(stderr, "request range content failed with bad status code %s\n", status);
-			return ERR_REQUEST_RANGE;
+			return ERR_RET_VAL;
 		}
 
-		if ((ptr = strstr(ptr, "Content-Length")))
+		if ((ptr = strstr(ptr, "Content-Length:")))
 		{
 			int range_len, nbody_read, nleft;
 			int flags;
 			char tmp_file_name[PATH_MAX];
 			FILE *fp;
 
-
-			sscanf(ptr, "Content-Length %d", &range_len);
+			ptr += strlen("Content-Length:");
+			sscanf(ptr, "%d", &range_len);
 			if (!(body = strstr(ptr, "\r\n\r\n")) || (range_len-1) != (part->end_pos - part->beg_pos))
 			{
 				close(connfd);
-				return ERR_FALSE;
+				return ERR_RET_VAL;
 			}
 			body += 4;
 			nbody_read = strlen(body);
 			snprintf(tmp_file_name, PATH_MAX, part->d_task->tmp_file_name_fmt, part->id);
-			if (!(fp = fopen(tmp_file_name, "w+")))
+			printf("tmp file name is %s\n", tmp_file_name);
+			if (!(fp = fopen(tmp_file_name, "a+")))
 			{
 				close(connfd);
-				return ERR_OPEN_TMP_FILE;
+				return ERR_RET_VAL;
 			}
 			fwrite(body, 1, nbody_read, fp);
 			download_progress(part->d_task, nbody_read, part->file->length);
 			
 			
 			nleft = range_len - nbody_read;
-			flags = fcntl(connfd, F_GETFL, 0);
-			fcntl(connfd, F_SETFL, flags |= O_NONBLOCK);
+			//flags = fcntl(connfd, F_GETFL, 0);
+			//fcntl(connfd, F_SETFL, flags |= O_NONBLOCK);
 			
 			while (nleft > 0)
 			{
-				if ((nbody_read = read(connfd, response, MAX_BUFFER_LEN)) <= 0)
+				nbody_read = read(connfd, response, MAX_BUFFER_LEN);
+				if (nbody_read < 0)
 				{
-					if (errno != EWOULDBLOCK)
-					{
-						fclose(fp);
-						close(connfd);
-						return ERR_FALSE;
-					}
-					continue;
+					perror("read failed:");
+					fclose(fp);
+					close(connfd);
+					return ERR_RET_VAL;
+				}
+				else if (nbody_read == 0)
+				{
+					close(connfd);
+					part->beg_pos = part->end_pos - nleft + 1;
+					goto BEGIN_DOWN;
 				}
 				fwrite(response, 1, nbody_read, fp);
 				download_progress(part->d_task, nbody_read, part->file->length);
@@ -465,114 +483,85 @@ static void *download_part_entry(void *arg)
 			fclose(fp);
 			return 0;
 		}
-		return ERR_FALSE;
+		return ERR_RET_VAL;
 	}
 }
-
-static void make_unique_file_name(const char *name_in, char *name_out, int max)
-{
-	char fmt[64];
-	char *psuffix = NULL, *ptr;
-	int n, i = 0;
-	strncpy(name_out, name_in, max);
-	if (access(name_out, F_OK) < 0)
-		return;
-
-	if (psuffix = strrchr(name_in, '.'))
-		n = psuffix - name_in;
-	else
-		n = strlen(name_in);
-	ptr = name_out + n;
-	strcpy(fmt, "(%d)");
-	while (1)
-	{
-		i++;
-		snprintf(ptr, PATH_MAX, fmt, i);
-		if (psuffix)
-			strcat(name_out, psuffix);
-		if (access(name_out, F_OK) < 0)
-			break;
-	}
 }
 
-static int merge_files(file_info_t *file, d_task_t *d_task, part_info_t *parts_info, int n)
+static int merge_files(const char *dst_file, int dst_len, char src_files[MAX_PART_NUMBER][PATH_MAX], int *src_lens, int nsrcs)
 {
-	char tmp_file_path[PATH_MAX];
-	char file_path[PATH_MAX];
-	int file_fd;
-	void *file_buf;
-	int mem_len, file_offset, file_mapped_len, file_len;
-	const int FILE_BUFFER_LIMIT = 512 * 1024 * 1024; // max file cache is 512MB
-	char *ptr;
-	int i;
+	int src_fd, dst_fd, i;
+	void *src_buf, *dst_buf;
+	int src_mapped_len, dst_mapped_len, dst_mem_beg_pos;
+	int src_offset, dst_offset;
 
-	// generate unique file name
-	strcat(d_task->file_saved_path, file->d_url.filename);
-	make_unique_file_name(d_task->file_saved_path, file_path, PATH_MAX);
+	int file_buffer_limit = sysconf(_SC_PAGE_SIZE) * 128 * 1024; // about 512MB
 
-	// open saved file, and map to RAM
-	if ((file_fd = open(file_path, O_RDWR | O_CREAT, S_IRWXU | S_IROTH | S_IRGRP)) < 0)
-		return ERR_FALSE;
-	ftruncate(file_fd, file->length);
-	file_len = file->length;
-	file_mapped_len = file->length > FILE_BUFFER_LIMIT ? FILE_BUFFER_LIMIT : file->length;
-	if ((file_buf = mmap(NULL, file_mapped_len, PROT_READ | PROT_WRITE, MAP_SHARED, file_fd, 0))
-			== MAP_FAILED)
-		goto MERGE_FAILED;
-	mem_len = 0;
-	file_len    -= file_mapped_len;
-	file_offset += file_mapped_len;
-
-	// merge part files
-	strcpy(tmp_file_path, download_tmp_path);
-	ptr = tmp_file_path + strlen(tmp_file_path);
-	for (i = 0; i < n; i++)
+	if ((dst_fd = open(dst_file, O_RDWR)) < 0)
+		return ERR_REQUEST_RANGE;
+	ftruncate(dst_fd, dst_len);
+	dst_mapped_len = dst_len > file_buffer_limit ? file_buffer_limit : dst_len;
+	
+	if ((dst_buf = mmap(NULL, dst_mapped_len, PROT_READ | PROT_WRITE, MAP_SHARED, dst_fd, 0)) == MAP_FAILED)
 	{
-		int fd, offset = 0;
-		void *buffer;
-		int part_len = parts_info[i].end_pos - parts_info[i].beg_pos + 1;
+		close(dst_fd);
+		return ERR_MERGE_FILES;
+	}
+	dst_len    -= dst_mapped_len;
+	dst_offset += dst_mapped_len;
+	dst_mem_beg_pos = 0;
 
-		sprintf(ptr, d_task->tmp_file_name_fmt, i);
-		if ((fd = open(tmp_file_path, O_RDONLY)) < 0)
-			goto MERGE_FAILED;
-		while (part_len > 0)
+	for ( i = 0; i < nsrcs; i++)
+	{
+		if ((src_fd = open(src_files[i], O_RDONLY)) < 0)
 		{
-			int mapped_len = part_len > FILE_BUFFER_LIMIT? FILE_BUFFER_LIMIT : part_len;
-			if ((buffer = mmap(NULL, part_len, PROT_READ, MAP_SHARED, fd, offset)) == MAP_FAILED)
-				goto MERGE_FAILED;
+			munmap(dst_buf, dst_mapped_len);
+			close(dst_fd);
+			return ERR_MERGE_FILES;
+		}
+		src_offset = 0;
+		while (src_lens[i] > 0)
+		{
+			src_mapped_len = src_lens[i] > file_buffer_limit ? file_buffer_limit : src_lens[i];
+			if ((src_buf = mmap(NULL, src_mapped_len, PROT_READ, MAP_SHARED, src_fd, src_offset)) == MAP_FAILED)
+			{
+				munmap(dst_buf, dst_mapped_len);
+				close(dst_fd);
+				close(src_fd);
+				return ERR_MERGE_FILES;
+			}
 
-			part_len -= mapped_len;
-			offset   += mapped_len;
+			src_lens[i] -= src_mapped_len;
+			src_offset  += src_mapped_len;
 
 			// copy to the dest file buffer
-			if (mem_len + mapped_len > FILE_BUFFER_LIMIT)
+			if (dst_mem_beg_pos + src_mapped_len > file_buffer_limit)
 			{
-				munmap(file_buf - mem_len, file_mapped_len);
-				mem_len = 0;
-				file_mapped_len = file_len > FILE_BUFFER_LIMIT ? FILE_BUFFER_LIMIT : file_len;
-				if ((file_buf = mmap(NULL, file_mapped_len, PROT_READ | PROT_WRITE, 
-						MAP_SHARED, file_fd, file_offset)) == MAP_FAILED)
-					goto MERGE_FAILED;
-				
-				file_len    -= file_mapped_len;
-				file_offset += file_mapped_len;
-			}
-			mem_len += mapped_len;
-			memcpy(file_buf, buffer, mapped_len);
-			file_buf = (char *)file_buf + mapped_len;
+				munmap(dst_buf - dst_mem_beg_pos, dst_mapped_len);
+				dst_mapped_len = dst_len > file_buffer_limit ? file_buffer_limit : dst_len;
+				if ((dst_buf = mmap(NULL, dst_mapped_len, PROT_READ | PROT_WRITE, MAP_SHARED, dst_fd, dst_offset)) == MAP_FAILED)
+				{
+					munmap(src_buf, src_mapped_len);
+					close(src_fd);
+					close(dst_fd);
+					return ERR_MERGE_FILES;
+				}
 
-			munmap(buffer, mapped_len);
+				dst_mem_beg_pos = 0;
+				dst_len    -= dst_mapped_len;
+				dst_offset += dst_mapped_len;
+			}
+			dst_mem_beg_pos += src_mapped_len;
+			memcpy(dst_buf, src_buf, src_mapped_len);
+			dst_buf = (char *)dst_buf + src_mapped_len;
+			munmap(src_buf, src_mapped_len);
 		}
-		close(fd);
-		unlink(tmp_file_path);
+		close(src_fd);
+		unlink(src_files[i]);
 	}
-	munmap(file_buf - mem_len, file_mapped_len);
-	close(file_fd);
+	munmap(dst_buf - dst_mem_beg_pos, dst_mapped_len);
+	close(dst_fd);
 	return 0;
-MERGE_FAILED:
-    close(file_fd);
-	unlink(file_path);
-	return ERR_FALSE;
 }
 
 static void *dispatch_part_download(d_task_t *d_task, file_info_t *file, 
@@ -583,10 +572,12 @@ static void *dispatch_part_download(d_task_t *d_task, file_info_t *file,
 	// allocate on stack
 	task_desc descs[MAX_PART_NUMBER];
 	part_info_t parts_info[MAX_PART_NUMBER];
-	char tmp_file_name[PATH_MAX];
+	char tmp_files_name[MAX_PART_NUMBER][PATH_MAX];
+	int part_lens[MAX_PART_NUMBER];
 	int part_downloaded_len = 0;
 	struct stat sb;
 	int ret;
+	char sql_buf[256];
 
 	for (i = 0; i < parts; i++)
 	{
@@ -601,9 +592,10 @@ static void *dispatch_part_download(d_task_t *d_task, file_info_t *file,
 		parts_info[i].d_task  = d_task;
 		parts_info[i].file    = file;
 		parts_info[i].id      = i;
+		part_lens[i]          = parts_info[i].end_pos - parts_info[i].beg_pos + 1;
 
-		snprintf(tmp_file_name, PATH_MAX, d_task->tmp_file_name_fmt, i);
-		ret = stat(tmp_file_name, &sb);
+		snprintf(tmp_files_name[i], PATH_MAX, d_task->tmp_file_name_fmt, i);
+		ret = stat(tmp_files_name[i], &sb);
 		if (ret != 0 && errno != ENOENT)
 		{
 			perror("stat file size failed:");
@@ -624,8 +616,22 @@ static void *dispatch_part_download(d_task_t *d_task, file_info_t *file,
 	pthread_mutex_unlock(d_task->mutex);
 
 	// save downloaded file
-	if (merge_files(file, d_task, parts_info, parts) < 0)
-		return ERR_MERGE_FILES;
+	{
+		char file_full_path[PATH_MAX];
+		char *p;
+		snprintf(file_full_path, PATH_MAX, "%s/%s", d_task->file_saved_path, file->filename);
+		if(merge_files(file_full_path, file->length, tmp_files_name, part_lens, parts) < 0)
+			fprintf(stderr, "merge files failed\n");
+		if(p = strrchr(tmp_files_name[0], '/'))
+		{
+			*++p = 0;
+			rmdir(tmp_files_name[0]);
+		}
+	}
+	// delete file record from db
+	snprintf(sql_buf, sizeof(sql_buf), SQL_DEL_FILE, file->filename, d_task->file_saved_path);
+	db_execute(d_task->dm->db_key, sql_buf, NULL);
+
 	if (d_task->finished_callback)
 		d_task->finished_callback(NULL);
 }
@@ -634,8 +640,14 @@ static void *download_entry(void *arg)
 {
 	d_task_t *d_task = (d_task_t *)arg;
 	file_info_t file;
-	char sql_buf[256];
+	char sql_buf[1024];
 	char real_url[MAX_URL_LEN];
+	char tmp_file_name_fmt[PATH_MAX];
+	char file_full_path[PATH_MAX];
+
+
+	int ret, i;
+	char *ptr, *ptr2;
 
 	if (request_download_file(d_task->url, &file, real_url) == 0)
 	{
@@ -657,15 +669,50 @@ static void *download_entry(void *arg)
 			if (last_part_len > 0)
 				last_part_len += per_part_len;
 		}
-		
-		strcpy(d_task->tmp_file_name_fmt, file.d_url.filename);
-		strcat(d_task->tmp_file_name_fmt, TMP_FILE_SUFFIX_FMT);
-		make_unique_file_name(d_task->tmp_file_name_fmt, d_task->tmp_file_name_fmt, PATH_MAX); // filename.ext(n)._tmp_%d
+
+		// create unique downloading file
+		snprintf(file_full_path, PATH_MAX, "%s/%s", d_task->file_saved_path, file.d_url.filename);
+		ptr = strrchr(file_full_path, '.');
+		if (!ptr)
+			ptr = file_full_path + strlen(file_full_path);
+		ptr2 = strrchr(file.d_url.filename, '.');
+		i = 0;
+		while (1)
+		{
+			ret = open(file_full_path, O_CREAT | O_EXCL, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+			if (ret == -1 && errno == EEXIST)
+				sprintf(ptr, "(%d)%s", ++i, (ptr2 ? ptr2 : ""));
+			else if (ret == -1)
+				return ERR_RET_VAL;
+			else
+				break;
+		}
+		if (ptr = strrchr(file_full_path, '/'))
+			strcpy(file.filename, ++ptr);
+		// create unique tmp file dir
+		strcpy(tmp_file_name_fmt, file.filename);
+		ptr = tmp_file_name_fmt + strlen(tmp_file_name_fmt);
+		i = 0;
+		while (1)
+		{
+			ret = mkdir(tmp_file_name_fmt, S_IRWXU);
+			if (ret != 0 && errno == EEXIST)
+				sprintf(ptr, "(%d)", ++i);
+			else if (ret != 0)
+				return ERR_RET_VAL;
+			else
+				break;
+		}
+		snprintf(d_task->tmp_file_name_fmt, PATH_MAX, "%s/%s", tmp_file_name_fmt, TMP_FILE_SUFFIX_FMT); // filename.ext(n)/._tmp_%d
 
 		// save this task to db file
-		snprintf(sql_buf, sizeof(sql_buf), SQL_INSERT_VALUES, file.d_url.filename, 
+		snprintf(sql_buf, sizeof(sql_buf), SQL_INSERT_VALUES, file.filename, 
 				real_url, d_task->file_saved_path, file.length, d_task->tmp_file_name_fmt, parts,
 				per_part_len, last_part_len);
+
+//#if debug
+		printf("sql string is %s\n", sql_buf);
+//endif
 		db_execute(d_task->dm->db_key, sql_buf, NULL);
 
 		dispatch_part_download(d_task, &file, per_part_len, last_part_len, parts);
@@ -691,15 +738,15 @@ static void *recover_entry(void *arg)
 	{
 		fprintf(stderr, "SQL error: %s\n", err_msg);
 		sqlite3_free(err_msg);
-		return -1;
+		return ERR_RET_VAL;
 	}
 	if (row != 1 || col != 8)
-		return -1;
+		return ERR_RET_VAL;
 	i = col + 1;
 
 	// file_url
 	if (parse_url(results[i++], &file.d_url) < 0)
-		return -1;
+		return ERR_RET_VAL;
 
 	// file_saved_path
 	strncpy(d_task->file_saved_path, results[i++], PATH_MAX);
@@ -747,7 +794,7 @@ downloader *easy_downloader_init()
 		return NULL;
 	chdir(download_tmp_path);
 
-	if (!(ret = db_connect(&db_key)))
+	if ((ret = db_connect(&db_key)) != 0)
 		return NULL;
 
 	d_manager_t *manager = (d_manager_t *)malloc(sizeof(d_manager_t));
@@ -850,7 +897,7 @@ int easy_downloader_get_breakpoints(downloader *inst, d_breakpoint_t *bps, int m
 	{
 		fprintf(stderr, "SQL error: %s\n", err_msg);
 		sqlite3_free(err_msg);
-		return -1;
+		return ERR_DB_EXCUTE;
 	}
 
 	for (i = 0; i < row && i < max; i++)

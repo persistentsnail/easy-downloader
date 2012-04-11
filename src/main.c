@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <pthread.h>
 
 #include "downloader.h"
 
@@ -34,6 +35,17 @@ int parse_opt(const char *str)
 		default:
 			return -1;
 	}
+}
+
+pthread_cond_t g_cond = PTHREAD_COND_INITIALIZER;
+pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
+int g_finished = 0;
+void *download_finished(void *arg)
+{
+	pthread_mutex_lock(&g_mutex);
+	g_finished = 1;
+	pthread_mutex_unlock(&g_mutex);
+	pthread_cond_signal(&g_cond);
 }
 
 
@@ -74,11 +86,12 @@ int main(int argc, char *argv[])
 	}
 	else if(check_url(argv[index]))
 	{
+		opt = 2;
 		p_url = argv[index];
 		index++;
 		if (index == argc - 1)
 			saved_path = argv[index];
-		else
+		else if (index < argc - 1)
 			goto PARSE_ARGV_FAILED;
 	}
 	else
@@ -102,14 +115,19 @@ int main(int argc, char *argv[])
 		break;
 		case 2:
 		{
-			easy_downloader_add_task(der, p_url, saved_path, NULL, NULL);
+			easy_downloader_add_task(der, p_url, saved_path, download_finished, NULL);
 		}
 		break;
 		default:
 		fprintf(stderr, "run time error\n");
 		exit(EXIT_FAILURE);
 	}
+	pthread_mutex_lock(&g_mutex);
+	while (!g_finished)
+		pthread_cond_wait(&g_cond, &g_mutex);
+	pthread_mutex_unlock(&g_mutex);
+	easy_downloader_destroy(der);
 	return 0;
 PARSE_ARGV_FAILED:
-    printf("%s", USAGE_STR);
+    printf("error parameters.\n%s", USAGE_STR);
 }
