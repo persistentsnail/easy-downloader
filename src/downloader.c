@@ -275,7 +275,6 @@ static int write_n_chars(int fd, char *in_chars, int n)
 
 #define CONNECT_STR_FMT_1 "GET %s HTTP/1.1\r\n"   \
                           "Host: %s\r\n"          \
-						  "Referer: %s\r\n"       \
 						  "User-Agent: Mozilla/5.0 (X11; Linux i686)\r\n"           \
 						  "Accept: */*\r\n"       \
 						  "Pragma: no-cache\r\n"  \
@@ -284,12 +283,12 @@ static int write_n_chars(int fd, char *in_chars, int n)
 
 #define CONNECT_STR_FMT_2 "GET %s HTTP/1.1\r\n"   \
                           "Host: %s\r\n"          \
-						  "Referer: %s\r\n"       \
 						  "User-Agent: Mozilla/5.0 (X11; Linux i686)\r\n"           \
 						  "Accept: */*\r\n"       \
 						  "Range: bytes=%d-%d\r\n"\
 						  "Pragma: no-cache\r\n"  \
-						  "Cache-control: no-cache\r\n\r\n"       \
+						  "Cache-control: no-cache\r\n"       \
+						  "Connection: close\r\n\r\n"   \
 
 static int request_download_file(const char *url, file_info_t *file, char *url_redirect)
 {
@@ -308,7 +307,7 @@ static int request_download_file(const char *url, file_info_t *file, char *url_r
 		{
 			char request[MAX_BUFFER_LEN];
 
-			snprintf(request, MAX_BUFFER_LEN, CONNECT_STR_FMT_1, d_url->path, d_url->host, d_url->host);
+			snprintf(request, MAX_BUFFER_LEN, CONNECT_STR_FMT_1, d_url->path, d_url->host);
 
 //#if debug
 			/*printf("request is %s", request);*/
@@ -403,7 +402,7 @@ static int request_part_download_file(part_info_t *part)
 		char *ptr;
 		char status[4];
 		snprintf(request,MAX_BUFFER_LEN, CONNECT_STR_FMT_2, part->file->d_url.path,part->file->d_url.host,
-		part->file->d_url.host, part->beg_pos, part->end_pos);
+				part->beg_pos, part->end_pos);
 		if (strlen(request) != write_n_chars(connfd, request, strlen(request)))
 		{
 			close(connfd);
@@ -483,7 +482,11 @@ static int request_part_download_file(part_info_t *part)
 						//#endif
 						start_read_body = 1;
 						body += 4;
-						nbody_read = strlen(body);
+						nbody_read = nread - (body - response);
+
+						//#if debug
+						printf("**********************\nhead length is %d, total nread is %d, nbody_read is %d\n*****************\n", body - response, nread, nbody_read);
+						//#endif
 						
 					}
 				}
@@ -519,7 +522,7 @@ static int request_part_download_file(part_info_t *part)
 				}
 				else if (nread == 0)
 				{
-					fprintf(stderr, "left %d bytes to recieve, but srv close, is anything wrong about srv?\n", nleft);
+					fprintf(stderr, ">>this time only %d body read<<\n, left %d bytes to recieve, but srv close, is anything wrong about srv?\n", range_len - nleft, nleft);
 					// #if debug
 					printf("http header is %s\n", http_header);
 					// #endif
@@ -615,7 +618,7 @@ static int merge_files(const char *dst_file, int dst_len, char src_files[MAX_PAR
 			munmap(src_buf, src_mapped_len);
 		}
 		close(src_fd);
-		/*unlink(src_files[i]);*/
+		unlink(src_files[i]);
 	}
 	munmap(dst_buf - dst_mem_beg_pos, dst_mapped_len);
 	close(dst_fd);
