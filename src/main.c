@@ -105,11 +105,19 @@ int main(int argc, char *argv[])
 		case 1:
 		{
 			if (file_name)
-				easy_downloader_recover_task(der, file_name, NULL, NULL);
+				easy_downloader_recover_task(der, file_name, download_finished, NULL);
 			else
 			{
 				d_breakpoint_t bps[5];
-				easy_downloader_get_breakpoints(der, bps, 5);
+				int cnt = easy_downloader_get_breakpoints(der, bps, 5);
+				int i;
+				for (i = 0; i < cnt; i++)
+				{
+					printf("%d.\t%s\t%d/%d\t%f", i+1, bps[i].file_name,
+					bps[i].len_downloaded, bps[i].file_length, 0.1f*bps[i].len_downloaded/bps[i].file_length);
+					printf("\n");
+				}
+				return 0;
 			}
 		}
 		break;

@@ -2,7 +2,7 @@
 #define __DOWNLOADER_H__
 
 #include <limits.h>
-#define MAX_URL_LEN        256 + 32
+
 
 typedef struct _downloader
 {
@@ -35,5 +35,6 @@ void easy_downloader_recover_task(downloader *inst, const char *file_name, d_cal
 int easy_downloader_get_breakpoints(downloader *inst, d_breakpoint_t *bps, int max);
 
 void easy_downloader_destroy(downloader *inst);
+
 
 #endif
