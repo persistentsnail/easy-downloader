@@ -43,6 +43,14 @@ void db_close(sqlite3 *db_key)
 	sqlite3_close(db_key);
 }
 
+static int hex2int(char hex)
+{
+	int t = hex - '0';
+	if (t > 9)
+		t = hex - 'A' + 10;
+	return t;
+}
+
 int parse_url(const char *url, d_url_t *d_url)
 {
 	const char *begin = url;
@@ -66,7 +74,23 @@ int parse_url(const char *url, d_url_t *d_url)
 		*d_url->port++ = '\0';
 
 	// path
-	strcpy(d_url->path, end);
+	/*strcpy(d_url->path, end);*/
+	{
+		char *p = d_url->path;
+		while (*end)
+		{
+			if (*end == '%')
+			{
+				if (!*(end + 1) || !*(end + 2))
+					return ERR_URL;
+				*p++ = (hex2int(*(end + 1)) << 4) + hex2int(*(end + 2));
+				end += 3;
+			}
+			else
+				*p++ = *end++;
+		}
+		*p = '\0';
+	}
 
 	if (d_url->port == NULL)
 	{
